@@ -37,7 +37,7 @@ import {
   ACCOUNT_FIELDS,
   ACCOUNT_ID_FIELD,
   MEDIA_FIELDS,
-  OPTIONAL_MEDIA_FIELDS,
+  PROBEABLE_MEDIA_FIELDS,
   INSIGHT_METRICS_REELS_FEED,
   INSIGHTS_SCOPE,
   BASIC_SCOPE,
@@ -437,7 +437,11 @@ export function registerRoutes(app: Express, deps: RouteDeps): { store: SessionS
       res.status(400).json({ error: 'invalid_input', message: 'Provide at least one official media ID.' });
       return;
     }
-    const fields = [...MEDIA_FIELDS, ...OPTIONAL_MEDIA_FIELDS];
+    // Default media request contains only fields known to belong to the
+    // Instagram Login integration. Facebook-Login-only fields are never bundled
+    // here (a single unsupported field may reject the whole fields= request);
+    // use POST /api/instagram/media/probe to test them in isolation.
+    const fields = [...MEDIA_FIELDS];
     const medias: Array<Record<string, unknown>> = [];
     const notReturned: string[] = [];
     let lastResult: ApiCallResult | null = null;
@@ -478,6 +482,52 @@ export function registerRoutes(app: Express, deps: RouteDeps): { store: SessionS
     });
   });
 
+  // ---------- Experimental field probe (isolated; never bundled with core flow) ----------
+  // Tests a single Facebook-Login-documented or otherwise risky field (e.g.
+  // media_product_type) against one media ID so a rejection cannot break the
+  // core media-resolution workflow. Allowlisted to prevent arbitrary injection.
+  app.post('/api/instagram/media/probe', async (req, res) => {
+    if (!sameOriginGuard(req, d)) {
+      res.status(403).json({ error: 'csrf_blocked', message: 'Blocked cross-site or unflagged request.' });
+      return;
+    }
+    const session = requireSession(req, res, d);
+    if (!session || !session.tokens) return;
+    const body = (req.body ?? {}) as { mediaId?: unknown; field?: unknown };
+    const mediaId = typeof body.mediaId === 'string' ? body.mediaId.trim() : '';
+    const field = typeof body.field === 'string' ? body.field.trim() : '';
+    if (!mediaId || !field) {
+      res.status(400).json({ error: 'invalid_input', message: 'Provide mediaId and field.' });
+      return;
+    }
+    if (!(PROBEABLE_MEDIA_FIELDS as readonly string[]).includes(field)) {
+      res.status(400).json({
+        error: 'invalid_input',
+        message: `Field "${field}" is not probeable. Allowed: ${(PROBEABLE_MEDIA_FIELDS as readonly string[]).join(', ')}.`,
+      });
+      return;
+    }
+    const fields = ['id', field];
+    const result = await fetchMedia(session.tokens.accessToken, mediaId, fields, d.apiVersion, {
+      fetchImpl: d.fetchImpl,
+    });
+    const observation = d.observations.add(session.key, {
+      kind: 'media_fetch',
+      startedAt: result.startedAt,
+      receivedAt: result.receivedAt,
+      endpoint: `GET graph.instagram.com/${d.apiVersion}/${mediaId} (experimental probe: ${field})`,
+      requested: { fields, mediaId },
+      httpStatus: result.httpStatus,
+      providerError: result.providerError,
+      transportError: result.transportError,
+      metrics: [],
+      data: result.data,
+      precisionWarnings: result.precisionWarnings,
+      ok: result.ok,
+    });
+    res.json({ observationId: observation.id, ...sanitizeApiResultForClient(result, { fields }) });
+  });
+
   // ---------- Resolve Reel/post URL -> official media ----------
   app.post('/api/instagram/resolve', async (req, res) => {
     if (!sameOriginGuard(req, d)) {
@@ -494,7 +544,7 @@ export function registerRoutes(app: Express, deps: RouteDeps): { store: SessionS
     }
     const parsed = parseMediaInput(input);
     if (parsed.kind === 'media_id' && parsed.mediaId) {
-      const fields = [...MEDIA_FIELDS, ...OPTIONAL_MEDIA_FIELDS];
+      const fields = [...MEDIA_FIELDS];
       const result = await fetchMedia(session.tokens.accessToken, parsed.mediaId, fields, d.apiVersion, {
         fetchImpl: d.fetchImpl,
       });
@@ -530,7 +580,12 @@ export function registerRoutes(app: Express, deps: RouteDeps): { store: SessionS
     }
     const maxPagesRaw = typeof body.maxPages === 'number' ? body.maxPages : MAX_RESOLVE_PAGES;
     const maxPages = Number.isSafeInteger(maxPagesRaw) ? Math.min(Math.max(maxPagesRaw, 1), MAX_RESOLVE_PAGES) : MAX_RESOLVE_PAGES;
-    const fields = [...MEDIA_FIELDS, ...OPTIONAL_MEDIA_FIELDS];
+    // Instagram-Login-only default fields (see media/fetch above).
+    const fields = [...MEDIA_FIELDS];
+    // Truthful evidence timing: capture before page 1; end at the last provider
+    // response receipt (not after response serialization).
+    const resolveStartedAt = Date.now();
+    let resolveReceivedAt = resolveStartedAt;
     let after: string | undefined;
     let pagesWalked = 0;
     let matched: Record<string, unknown> | null = null;
@@ -546,11 +601,13 @@ export function registerRoutes(app: Express, deps: RouteDeps): { store: SessionS
       );
       lastStatus = listResult.httpStatus;
       lastError = listResult.providerError;
+      resolveReceivedAt = listResult.receivedAt;
       if (!listResult.ok) break;
       const { ids, after: next } = extractMediaPage(listResult.data);
       pagesWalked += 1;
       for (const id of ids) {
         const detail = await fetchMedia(session.tokens.accessToken, id, fields, d.apiVersion, { fetchImpl: d.fetchImpl });
+        resolveReceivedAt = detail.receivedAt;
         if (!detail.ok || !detail.data || typeof detail.data !== 'object') continue;
         const media = detail.data as Record<string, unknown>;
         if (mediaMatchesRequest(media, { shortcode: parsed.shortcode, canonicalUrl: parsed.canonicalUrl })) {
@@ -564,8 +621,8 @@ export function registerRoutes(app: Express, deps: RouteDeps): { store: SessionS
     }
     const observation = d.observations.add(session.key, {
       kind: 'media_fetch',
-      startedAt: Date.now(),
-      receivedAt: Date.now(),
+      startedAt: resolveStartedAt,
+      receivedAt: resolveReceivedAt,
       endpoint: `Resolve ${parsed.canonicalUrl ?? parsed.shortcode} via owned-media walk (bounded ${maxPages} pages)`,
       requested: { mediaId: parsed.shortcode ?? undefined },
       httpStatus: matched ? 200 : lastStatus,

@@ -9,17 +9,25 @@
  *                      redirect_uri, code) -> { data: [{ access_token, user_id, permissions }] }
  * - Long-lived:       GET https://graph.instagram.com/access_token
  *                     ?grant_type=ig_exchange_token&client_secret&access_token
+ *                     (query-string tokens required here per Meta docs)
  * - Refresh:          GET https://graph.instagram.com/refresh_access_token
  *                     ?grant_type=ig_refresh_token&access_token
- * - Account:          GET https://graph.instagram.com/<ver>/me?fields=...&access_token=...
- * - Owned media:      GET https://graph.instagram.com/<ver>/<IG_ID>/media?limit&after&access_token=...
- * - Single media:     GET https://graph.instagram.com/<ver>/<MEDIA_ID>?fields=...&access_token=...
- * - Media Insights:   GET https://graph.instagram.com/<ver>/<MEDIA_ID>/insights?metric=...&access_token=...
+ *                     (query-string token required here per Meta docs)
+ * - Account:          GET https://graph.instagram.com/<ver>/me?fields=...
+ *                     Authorization: Bearer <token>
+ * - Owned media:      GET https://graph.instagram.com/<ver>/<IG_ID>/media?limit&after
+ *                     Authorization: Bearer <token>
+ * - Single media:     GET https://graph.instagram.com/<ver>/<MEDIA_ID>?fields=...
+ *                     Authorization: Bearer <token>
+ * - Media Insights:   GET https://graph.instagram.com/<ver>/<MEDIA_ID>/insights?metric=...
+ *                     Authorization: Bearer <token>
  *
  * Notes:
  * - No PKCE in Business Login docs; CSRF protection is via `state`.
- * - Graph endpoints take access_token as a query param; URLs are sanitized
- *   (token redacted) before logging/exporting.
+ * - Normal Graph reads use Bearer-token Authorization headers (per Meta's
+ *   current official Instagram Login collection). Query-string tokens are kept
+ *   only for the long-lived exchange/refresh endpoints where Meta requires them;
+ *   those URLs are sanitized (token redacted) before logging/exporting.
  * - An HTTP 200 carrying { error: {...} } is NOT success.
  * - Never logs tokens, secrets, codes, or authorization headers.
  */
@@ -438,7 +446,15 @@ export async function extendLongLivedToken(
 
 export function graphUrl(apiVersion: string, path: string, query: Record<string, string>): string {
   const search = new URLSearchParams(query);
-  return `${INSTAGRAM_GRAPH_HOST}/${apiVersion}${path}?${search.toString()}`;
+  const qs = search.toString();
+  return qs
+    ? `${INSTAGRAM_GRAPH_HOST}/${apiVersion}${path}?${qs}`
+    : `${INSTAGRAM_GRAPH_HOST}/${apiVersion}${path}`;
+}
+
+/** Authorization header for normal Graph reads. Never logged or exported. */
+function bearerHeaders(accessToken: string): Record<string, string> {
+  return { Authorization: `Bearer ${accessToken}` };
 }
 
 /** GET /me — account identity + profile fields. */
@@ -448,8 +464,8 @@ export async function fetchAccountInfo(
   apiVersion: string,
   opts: CommonCallOptions = {},
 ): Promise<ApiCallResult> {
-  const url = graphUrl(apiVersion, '/me', { fields: fields.join(','), access_token: accessToken });
-  return callGraphApi('GET /me', url, { method: 'GET' }, opts);
+  const url = graphUrl(apiVersion, '/me', { fields: fields.join(',') });
+  return callGraphApi('GET /me', url, { method: 'GET', headers: bearerHeaders(accessToken) }, opts);
 }
 
 /** GET /<IG_ID>/media — one page of owned media IDs (+ paging cursors). */
@@ -462,11 +478,10 @@ export async function fetchOwnedMediaPage(
 ): Promise<ApiCallResult> {
   const query: Record<string, string> = {
     limit: String(params.limit),
-    access_token: accessToken,
   };
   if (params.after) query.after = params.after;
   const url = graphUrl(apiVersion, `/${igUserId}/media`, query);
-  return callGraphApi(`GET /${igUserId}/media`, url, { method: 'GET' }, opts);
+  return callGraphApi(`GET /${igUserId}/media`, url, { method: 'GET', headers: bearerHeaders(accessToken) }, opts);
 }
 
 /** GET /<MEDIA_ID> — single media object with explicit fields. */
@@ -477,8 +492,8 @@ export async function fetchMedia(
   apiVersion: string,
   opts: CommonCallOptions = {},
 ): Promise<ApiCallResult> {
-  const url = graphUrl(apiVersion, `/${mediaId}`, { fields: fields.join(','), access_token: accessToken });
-  return callGraphApi(`GET /${mediaId}`, url, { method: 'GET' }, opts);
+  const url = graphUrl(apiVersion, `/${mediaId}`, { fields: fields.join(',') });
+  return callGraphApi(`GET /${mediaId}`, url, { method: 'GET', headers: bearerHeaders(accessToken) }, opts);
 }
 
 /** GET /<MEDIA_ID>/insights — explicit metric list. */
@@ -491,12 +506,16 @@ export async function fetchMediaInsights(
 ): Promise<ApiCallResult> {
   const url = graphUrl(apiVersion, `/${mediaId}/insights`, {
     metric: metrics.join(','),
-    access_token: accessToken,
   });
-  return callGraphApi(`GET /${mediaId}/insights`, url, { method: 'GET' }, opts);
+  return callGraphApi(`GET /${mediaId}/insights`, url, { method: 'GET', headers: bearerHeaders(accessToken) }, opts);
 }
 
-/** Extract media ID list + paging cursors from an owned-media page body. */
+/** Extract media ID list + paging cursors from an owned-media page body.
+ *
+ * A continuation is valid only when Meta supplies the `paging.next` relation;
+ * a bare `cursors.after` alone is NOT evidence another page exists. The `after`
+ * cursor is extracted for that continuation.
+ */
 export function extractMediaPage(data: unknown): { ids: string[]; after: string | null; hasMore: boolean } {
   if (typeof data !== 'object' || data === null) return { ids: [], after: null, hasMore: false };
   const obj = data as Record<string, unknown>;
@@ -510,12 +529,14 @@ export function extractMediaPage(data: unknown): { ids: string[]; after: string 
     }
   }
   const paging = obj.paging && typeof obj.paging === 'object' ? (obj.paging as Record<string, unknown>) : null;
+  const next = paging && typeof paging.next === 'string' && paging.next.length > 0 ? paging.next : null;
   const cursors =
     paging && typeof paging.cursors === 'object' && paging.cursors !== null
       ? (paging.cursors as Record<string, unknown>)
       : null;
-  const after = cursors && typeof cursors.after === 'string' ? cursors.after : null;
-  const hasMore = Boolean(after);
+  const after =
+    next && cursors && typeof cursors.after === 'string' && cursors.after.length > 0 ? cursors.after : null;
+  const hasMore = Boolean(next && after);
   return { ids, after, hasMore };
 }
 

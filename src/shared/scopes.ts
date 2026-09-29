@@ -51,12 +51,17 @@ export const MEDIA_FIELDS = [
 ] as const;
 
 /**
- * Optional fields that are only returned on some logins / media types.
- * - media_product_type is documented as Facebook-Login-only; requested
- *   opportunistically and tolerated when missing under Instagram Login.
+ * Experimental field probes (NOT part of the default media request).
+ * - media_product_type is documented as Facebook-Login-only; requesting it under
+ *   Instagram Login may reject the whole fields= request, so it must never be
+ *   bundled with the core media-resolution workflow. Use the explicit probe
+ *   endpoint (`POST /api/instagram/media/probe`) to test it in isolation.
  * - owner is only returned when the caller also created the media.
  */
 export const OPTIONAL_MEDIA_FIELDS = ['media_product_type', 'owner'] as const;
+
+/** Allowlist for the experimental probe endpoint (prevents arbitrary field injection). */
+export const PROBEABLE_MEDIA_FIELDS: readonly string[] = OPTIONAL_MEDIA_FIELDS;
 
 /** Default Insights metrics for Reels/Feed under Instagram Login. */
 export const INSIGHT_METRICS_REELS_FEED = [

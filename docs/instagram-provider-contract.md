@@ -27,6 +27,7 @@ Official sources consulted:
 | --- | --- | --- |
 | OAuth authorize endpoint | `https://www.instagram.com/oauth/authorize` | DOCUMENTED |
 | Token endpoint (code exchange) | `POST https://api.instagram.com/oauth/access_token` (form `client_id,client_secret,grant_type=authorization_code,redirect_uri,code`) | DOCUMENTED |
+| API authorization (normal Graph reads) | `Authorization: Bearer <token>` header; tokens never in normal Graph URLs (query-string tokens only for long-lived exchange/refresh where Meta requires them) | DOCUMENTED |
 | Grant type (code) | `authorization_code` | DOCUMENTED |
 | Required parameters (authorize) | `client_id` (Instagram App ID), `redirect_uri` (exact dashboard match), `response_type=code`, `scope` (comma or space separated) | DOCUMENTED |
 | Optional parameters | `state` (CSRF, optional at provider but required by lab), `force_reauth`, `enable_fb_login` | DOCUMENTED |
@@ -91,8 +92,9 @@ Official sources consulted:
 | Item | Value | Status |
 | --- | --- | --- |
 | Owned-media endpoint | `GET /<IG_ID>/media?limit&after` then `GET /<MEDIA_ID>?fields=...` per item | DOCUMENTED |
-| Pagination | Cursor `paging.cursors.after`; `limit` up to 25 in lab | DOCUMENTED |
-| Fields shown | `id`, `media_type`, `media_product_type` (FB-Login-only, tolerated missing), `permalink`, `shortcode`, `timestamp`, `caption` (FB-Login-only @ handling), `thumbnail_url`/`media_url`, `like_count`, `comments_count` | DOCUMENTED |
+| Pagination | Continuation requires `paging.next`; `paging.cursors.after` supplies the cursor for it; `limit` up to 25 in lab | DOCUMENTED |
+| Fields shown (default request) | `id`, `media_type`, `permalink`, `shortcode`, `timestamp`, `caption`, `username`, `like_count`, `comments_count`, `thumbnail_url`/`media_url` (Instagram-Login set; `Authorization: Bearer`) | DOCUMENTED |
+| Facebook-Login-only fields | `media_product_type`, `owner`, `saved_count`, `shares_count`, `caption` @ handling — excluded from default; isolated probe `POST /api/instagram/media/probe` | DOCUMENTED |
 | Personal media | Not returned (professional-only API) | DOCUMENTED |
 
 ## Reel URL → official media ID

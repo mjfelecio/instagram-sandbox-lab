@@ -28,6 +28,7 @@ vi.mock('../client/src/api', () => ({
     account: vi.fn(),
     mediaList: vi.fn(),
     mediaFetch: vi.fn(),
+    probe: vi.fn(),
     resolve: vi.fn(),
     insights: vi.fn(),
     refresh: vi.fn(),

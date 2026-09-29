@@ -122,6 +122,8 @@ export const api = {
     request<MediaListPayload>('/api/instagram/media', { after: after ?? undefined, limit }),
   mediaFetch: (ids: string[]) =>
     request<MediaFetchPayload>('/api/instagram/media/fetch', { ids }),
+  probe: (mediaId: string, field: string) =>
+    request<ApiCallPayload & { observationId: string }>('/api/instagram/media/probe', { mediaId, field }),
   resolve: (input: string, maxPages?: number) =>
     request<ResolvePayload>('/api/instagram/resolve', { input, maxPages }),
   insights: (mediaId: string, metrics?: string[]) =>

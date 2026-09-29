@@ -100,6 +100,8 @@ export default function App() {
 
   const [insights, setInsights] = useState<{ map: Record<string, number | null>; meta: FetchMeta; mediaId: string } | null>(null);
   const [insightsMetricsText, setInsightsMetricsText] = useState(DEFAULT_INSIGHT_METRICS.join(','));
+  const [probeField, setProbeField] = useState('media_product_type');
+  const [probeResult, setProbeResult] = useState<{ meta: FetchMeta } | null>(null);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -249,8 +251,29 @@ export default function App() {
     }
   }, [selected, insightsMetricsText]);
 
-  const doRefresh = useCallback(async () => {
-    setBusy('refresh');
+  const probeFieldAction = useCallback(async () => {
+    if (!selected || !probeField.trim()) return;
+    setBusy('probe');
+    setError(null);
+    try {
+      const payload = await api.probe(selected.id, probeField.trim());
+      setProbeResult({
+        meta: {
+          startedAt: payload.startedAt, receivedAt: payload.receivedAt, httpStatus: payload.httpStatus,
+          providerError: payload.providerError, transportError: payload.transportError,
+          precisionWarnings: payload.precisionWarnings, rawBody: payload.rawBody,
+          sanitizedUrl: payload.sanitizedUrl, requestedFields: payload.requestedFields ?? [],
+        },
+      });
+      if (!payload.ok) setError(describeFailure(`Probe ${probeField.trim()} failed`, payload));
+    } catch (e) {
+      setError(describeThrown(`Probe ${probeField.trim()} failed`, e));
+    } finally {
+      setBusy(null);
+    }
+  }, [selected, probeField]);
+
+  const doRefresh = useCallback(async () => {    setBusy('refresh');
     setError(null);
     try {
       await api.refresh();
@@ -276,6 +299,7 @@ export default function App() {
       setSelected(null);
       setInsights(null);
       setResolveResult(null);
+      setProbeResult(null);
       setNotReturned([]);
       await loadStatus();
     } catch (e) {
@@ -408,6 +432,27 @@ export default function App() {
               <FetchMetaLine meta={resolveResult.meta} />
               <JsonDetails label="resolve JSON" text={resolveResult.meta.rawBody} />
             </div>
+          )}
+
+          <h3>Experimental field probes</h3>
+          <p style={{ color: '#555' }}>
+            Isolated probe for fields documented as Facebook-Login-only (e.g. media_product_type).
+            Failure here cannot break the core media workflow above.
+          </p>
+          {!selected && <p style={{ color: '#a05a00' }}>Select a media item first.</p>}
+          {selected && (
+            <>
+              <label>Field: <input value={probeField} onChange={(e) => setProbeField(e.target.value)} style={{ width: 240 }} /></label>{' '}
+              <button type="button" onClick={() => void probeFieldAction()} disabled={busy === 'probe' || !probeField.trim()}>
+                {busy === 'probe' ? 'Probing…' : 'Fetch media_product_type'}
+              </button>
+              {probeResult && (
+                <>
+                  <FetchMetaLine meta={probeResult.meta} />
+                  <JsonDetails label="probe JSON" text={probeResult.meta.rawBody} />
+                </>
+              )}
+            </>
           )}
         </section>
       )}

@@ -308,7 +308,7 @@ describe('account and media', () => {
         if (url.includes('/179100/media')) {
           return {
             status: 200,
-            body: { data: [{ id: '179111' }, { id: '179112' }], paging: { cursors: { after: 'AFTER1' } } },
+            body: { data: [{ id: '179111' }, { id: '179112' }], paging: { cursors: { after: 'AFTER1' }, next: 'https://graph.instagram.com/v25.0/179100/media?after=AFTER1' } },
           };
         }
         if (url.includes('/179111?') || url.includes('/179111/')) {
@@ -489,9 +489,143 @@ describe('secret exclusion', () => {
   it('observation export never contains tokens', async () => {
     const harness = buildHarness({ fetchImpl: defaultFetch() });
     const cookie = await connectSession(harness);
-    const fetchSpy = vi.fn();
-    void fetchSpy;
     const obs = await request(harness.app).get('/api/observations').set('Cookie', cookie).expect(200);
     expect(JSON.stringify(obs.body)).not.toContain('short.1');
+  });
+});
+
+describe('preflight fixes', () => {
+  it('normal Graph reads use Bearer headers, not query tokens', async () => {
+    const seen: Array<{ url: string; auth: unknown }> = [];
+    const fetchImpl = jsonFetchFor((url) => {
+      if (url.includes('oauth/access_token')) return { status: 200, body: SHORT_EXCHANGE };
+      if (url.includes('graph.instagram.com/access_token')) return { status: 200, body: LONG_EXCHANGE };
+      if (url.includes('refresh_access_token')) return { status: 200, body: REFRESH_OK };
+      if (url.includes('/me?')) return { status: 200, body: { user_id: '179100' } };
+      return { status: 200, body: { data: [] } };
+    });
+    const wrapped = (async (url: string | URL, init?: RequestInit) => {
+      seen.push({ url: String(url), auth: (init?.headers as Record<string, string> | undefined)?.Authorization ?? null });
+      return (fetchImpl as unknown as (u: string | URL, i?: RequestInit) => Promise<Response>)(url, init);
+    }) as unknown as typeof fetch;
+    const harness = buildHarness({ fetchImpl: wrapped });
+    const cookie = await connectSession(harness);
+    await request(harness.app).post('/api/instagram/account').set(CSRF_HEADERS).set('Cookie', cookie).send({}).expect(200);
+    const meCall = seen.find((s) => s.url.includes('/me?'));
+    expect(meCall).toBeDefined();
+    expect(meCall!.auth).toMatch(/^Bearer /);
+    expect(meCall!.url).not.toContain('access_token');
+  });
+
+  it('media list with after cursor but no paging.next has hasMore=false', async () => {
+    const harness = buildHarness({
+      fetchImpl: jsonFetchFor((url) => {
+        if (url.includes('oauth/access_token')) return { status: 200, body: SHORT_EXCHANGE };
+        if (url.includes('graph.instagram.com/access_token')) return { status: 200, body: LONG_EXCHANGE };
+        if (url.includes('/179100/media')) {
+          return {
+            status: 200,
+            body: { data: [{ id: '179111' }], paging: { cursors: { after: 'STALE' } } },
+          };
+        }
+        return null;
+      }),
+    });
+    const cookie = await connectSession(harness);
+    const res = await request(harness.app).post('/api/instagram/media').set(CSRF_HEADERS).set('Cookie', cookie).send({}).expect(200);
+    expect(res.body.ids).toEqual(['179111']);
+    expect(res.body.after).toBeNull();
+    expect(res.body.hasMore).toBe(false);
+  });
+
+  it('default media fetch does not request Facebook-Login-only fields', async () => {
+    const seenUrls: string[] = [];
+    const fetchImpl = jsonFetchFor((url) => {
+      if (url.includes('oauth/access_token')) return { status: 200, body: SHORT_EXCHANGE };
+      if (url.includes('graph.instagram.com/access_token')) return { status: 200, body: LONG_EXCHANGE };
+      if (url.includes('/179111')) {
+        seenUrls.push(url);
+        return { status: 200, body: { id: '179111', media_type: 'VIDEO' } };
+      }
+      return { status: 400, body: { error: { message: 'x', code: 100 } } };
+    });
+    const wrapped = (async (url: string | URL, init?: RequestInit) => {
+      const s = String(url);
+      if (s.includes('/179111')) seenUrls.push(s);
+      return (fetchImpl as unknown as (u: string | URL, i?: RequestInit) => Promise<Response>)(url, init);
+    }) as unknown as typeof fetch;
+    const harness = buildHarness({ fetchImpl: wrapped });
+    const cookie = await connectSession(harness);
+    await request(harness.app)
+      .post('/api/instagram/media/fetch')
+      .set(CSRF_HEADERS)
+      .set('Cookie', cookie)
+      .send({ ids: ['179111'] })
+      .expect(200);
+    const fieldsParam = new URL(seenUrls.find((u) => u.includes('/179111'))!).searchParams.get('fields') ?? '';
+    expect(fieldsParam).not.toContain('media_product_type');
+    expect(fieldsParam).not.toContain('owner');
+    expect(fieldsParam).toContain('permalink');
+  });
+
+  it('experimental probe allows media_product_type in isolation and rejects unknown fields', async () => {
+    const harness = buildHarness({
+      fetchImpl: jsonFetchFor((url) => {
+        if (url.includes('oauth/access_token')) return { status: 200, body: SHORT_EXCHANGE };
+        if (url.includes('graph.instagram.com/access_token')) return { status: 200, body: LONG_EXCHANGE };
+        if (url.includes('/179111')) return { status: 200, body: { id: '179111', media_product_type: 'REELS' } };
+        return null;
+      }),
+    });
+    const cookie = await connectSession(harness);
+    const ok = await request(harness.app)
+      .post('/api/instagram/media/probe')
+      .set(CSRF_HEADERS)
+      .set('Cookie', cookie)
+      .send({ mediaId: '179111', field: 'media_product_type' })
+      .expect(200);
+    expect(ok.body.ok).toBe(true);
+    await request(harness.app)
+      .post('/api/instagram/media/probe')
+      .set(CSRF_HEADERS)
+      .set('Cookie', cookie)
+      .send({ mediaId: '179111', field: 'caption' })
+      .expect(400);
+  });
+
+  it('resolve observation uses truthful walk timing (startedAt <= receivedAt)', async () => {
+    const harness = buildHarness({
+      fetchImpl: jsonFetchFor((url) => {
+        if (url.includes('oauth/access_token')) return { status: 200, body: SHORT_EXCHANGE };
+        if (url.includes('graph.instagram.com/access_token')) return { status: 200, body: LONG_EXCHANGE };
+        if (url.includes('/179100/media')) {
+          return {
+            status: 200,
+            body: {
+              data: [{ id: '179111' }],
+              paging: { cursors: { after: 'A' }, next: 'https://graph.instagram.com/v25.0/179100/media?after=A' },
+            },
+          };
+        }
+        if (url.includes('/179111')) {
+          return { status: 200, body: { id: '179111', permalink: 'https://www.instagram.com/reel/ABC123/', shortcode: 'ABC123' } };
+        }
+        return null;
+      }),
+    });
+    const cookie = await connectSession(harness);
+    const res = await request(harness.app)
+      .post('/api/instagram/resolve')
+      .set(CSRF_HEADERS)
+      .set('Cookie', cookie)
+      .send({ input: 'https://www.instagram.com/reel/ABC123/' })
+      .expect(200);
+    expect(res.body.ok).toBe(true);
+    const obs = await request(harness.app).get('/api/observations').set('Cookie', cookie).expect(200);
+    const resolveObs = (obs.body.observations as Array<{ endpoint: string; startedAt: number; receivedAt: number }>).find((o) =>
+      o.endpoint.includes('owned-media walk'),
+    );
+    expect(resolveObs).toBeDefined();
+    expect(resolveObs!.startedAt).toBeLessThanOrEqual(resolveObs!.receivedAt);
   });
 });

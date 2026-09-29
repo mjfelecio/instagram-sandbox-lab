@@ -201,14 +201,33 @@ describe('account identity', () => {
 });
 
 describe('owned media pagination', () => {
-  it('extracts IDs and after cursor', () => {
+  it('extracts IDs and after cursor when paging.next is present', () => {
     const page = extractMediaPage({
       data: [{ id: '1791' }, { id: '1792' }],
-      paging: { cursors: { after: 'CURSOR123' } },
+      paging: { cursors: { after: 'CURSOR123' }, next: 'https://graph.instagram.com/v25.0/1791/media?after=CURSOR123' },
     });
     expect(page.ids).toEqual(['1791', '1792']);
     expect(page.after).toBe('CURSOR123');
     expect(page.hasMore).toBe(true);
+  });
+
+  it('after cursor without paging.next is NOT a continuation', () => {
+    const page = extractMediaPage({
+      data: [{ id: '1791' }],
+      paging: { cursors: { before: 'B', after: 'CURSOR123' } },
+    });
+    expect(page.ids).toEqual(['1791']);
+    expect(page.after).toBeNull();
+    expect(page.hasMore).toBe(false);
+  });
+
+  it('paging.next without after cursor is NOT a continuation', () => {
+    const page = extractMediaPage({
+      data: [{ id: '1791' }],
+      paging: { cursors: { before: 'B' }, next: 'https://graph.instagram.com/v25.0/1791/media?after=' },
+    });
+    expect(page.after).toBeNull();
+    expect(page.hasMore).toBe(false);
   });
 
   it('IDs remain strings', async () => {
@@ -225,6 +244,46 @@ describe('owned media pagination', () => {
   it('malformed provider data does not throw', () => {
     expect(extractMediaPage(null)).toEqual({ ids: [], after: null, hasMore: false });
     expect(extractMediaPage({ data: 'nope' })).toEqual({ ids: [], after: null, hasMore: false });
+  });
+});
+
+describe('Bearer authorization for normal Graph reads', () => {
+  it('sends Authorization Bearer header and keeps tokens out of URLs', async () => {
+    let seenUrl = '';
+    let seenAuth: unknown = null;
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      seenUrl = String(url);
+      const headers = init?.headers as Record<string, string> | undefined;
+      seenAuth = headers?.Authorization ?? null;
+      return new Response(JSON.stringify({ user_id: '1791' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    await fetchAccountInfo('TOKEN123', ['user_id'], 'v25.0', { fetchImpl });
+    expect(seenAuth).toBe('Bearer TOKEN123');
+    expect(seenUrl).not.toContain('TOKEN123');
+    expect(seenUrl).not.toContain('access_token');
+  });
+
+  it('owned media, single media, and insights all use Bearer headers', async () => {
+    const seen: Array<{ url: string; auth: unknown }> = [];
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      seen.push({ url: String(url), auth: (init?.headers as Record<string, string> | undefined)?.Authorization ?? null });
+      const s = String(url);
+      if (s.includes('/insights')) return new Response(JSON.stringify({ data: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      if (s.includes('/media')) return new Response(JSON.stringify({ data: [], paging: {} }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ id: '1791' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    await fetchOwnedMediaPage('TOK', '1791', { limit: 25 }, 'v25.0', { fetchImpl });
+    await fetchMedia('TOK', '1791', ['id'], 'v25.0', { fetchImpl });
+    await fetchMediaInsights('TOK', '1791', ['views'], 'v25.0', { fetchImpl });
+    expect(seen).toHaveLength(3);
+    for (const entry of seen) {
+      expect(entry.auth).toBe('Bearer TOK');
+      expect(entry.url).not.toContain('TOK');
+      expect(entry.url).not.toContain('access_token');
+    }
   });
 });
 

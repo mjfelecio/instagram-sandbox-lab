@@ -141,8 +141,12 @@ only; it does **not** revoke at Instagram (remove via Instagram Settings > Apps 
   Shows stable `user_id` (providerSubjectId candidate), app-scoped `id` (not identity),
   username, account type, follower/follows/media counts, `observedAt`. Missing values
   show `Not returned`, never zero.
-- **Tab B: Owned media** — `GET /<IG_ID>/media?limit=25&after=...` (cursor pagination)
-  lists IDs; **Fetch details** resolves each via `GET /<MEDIA_ID>?fields=...`
+- **Tab B: Owned media** — `GET /<IG_ID>/media?limit=25&after=...` with
+  `Authorization: Bearer` headers (normal Graph reads never put tokens in URLs).
+  Continuation requires `paging.next`; a bare `cursors.after` alone is not a next page.
+  Lists IDs; **Fetch details** resolves each via `GET /<MEDIA_ID>?fields=...`
+  (Instagram-Login-only default fields; Facebook-Login-only `media_product_type`/`owner`
+  are excluded — use **Experimental field probes** to test them in isolation).
   (thumbnail, official ID, media/product type, permalink, timestamp, basic counts).
   **Resolve Reel URL / permalink** accepts `.../reel/<shortcode>/`, `/p/<shortcode>/`,
   permalink, shortcode, or numeric media ID; ID inputs resolve directly, URL inputs walk
@@ -159,7 +163,8 @@ only; it does **not** revoke at Instagram (remove via Instagram Settings > Apps 
   "views": 123456, "likes": 1200, "comments": 50, "shares": 30, "saves": 25 }`.
   Shows official vs baseline, signed diff, % vs nonzero baseline, both observation times
   and gap. Unknown baseline time stays unknown. Export sanitized JSON.
-- **Observations** at `GET /api/observations`: per-request `startedAt`/`receivedAt`,
+- **Observations** at `GET /api/observations`: per-request `startedAt`/`receivedAt`
+  (resolve walks capture start before page 1 and end at the last provider receipt),
   sanitized endpoint (tokens redacted), requested fields/metrics, HTTP status, provider
   error, sanitized raw JSON, precision warnings. No tokens/secrets/codes/cookies/headers.
 
@@ -277,8 +282,9 @@ in this session).
 - **Token lifetime/refresh: short 1h → long 60d (`ig_exchange_token`) → refresh
   (`ig_refresh_token`, ≥24h old, valid, basic permission). DOCUMENTED.** Expired 60d
   or revoked tokens cannot refresh. No separate refresh-token string; access value rotates.
-- **Owned-media endpoint: `GET /<IG_ID>/media?limit&after` (+ `GET /<MEDIA_ID>?fields=`).
-  DOCUMENTED.** Cursor pagination (`paging.cursors.after`). List returns IDs; details
+- **Owned-media endpoint: `GET /<IG_ID>/media?limit&after` (+ `GET /<MEDIA_ID>?fields=`)
+  with `Authorization: Bearer`.
+  DOCUMENTED.** Continuation requires `paging.next` (bare `cursors.after` is not enough). List returns IDs; details
   fetched per media with explicit fields.
 - **Reel resolution: shortcode ≠ media ID; match `permalink`/`shortcode` against owned
   media via bounded walk. DOCUMENTED.** `permalink` + `shortcode` fields returned on

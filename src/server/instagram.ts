@@ -218,6 +218,18 @@ function formBody(fields: Record<string, string>): string {
   return new URLSearchParams(fields).toString();
 }
 
+function parseTokenResponse(text: string): unknown {
+  return JSON.parse(text, (key: string, value: unknown, context?: { source?: string }) => {
+    if ((key === 'user_id' || key === 'userId') && typeof value === 'number') {
+      // Use the original JSON digits: converting an already-rounded number loses identity.
+      // Older runtimes without reviver source can only accept safe integers.
+      const digits = context?.source ?? (Number.isSafeInteger(value) ? String(value) : '');
+      return /^[1-9]\d*$/.test(digits) ? digits : null;
+    }
+    return value;
+  });
+}
+
 export interface TokenCallResult {
   ok: boolean;
   httpStatus: number;
@@ -324,7 +336,7 @@ export async function exchangeAuthorizationCode(
   let parsed: unknown = null;
   try {
     const text = await boundedRead(response);
-    parsed = text.trim() ? JSON.parse(text) : null;
+    parsed = text.trim() ? parseTokenResponse(text) : null;
   } catch {
     parsed = null;
   }

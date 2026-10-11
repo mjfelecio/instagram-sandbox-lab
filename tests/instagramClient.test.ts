@@ -84,6 +84,42 @@ describe('authorize URL', () => {
 });
 
 describe('code exchange', () => {
+  it.each([
+    ['flat numeric ID', '{"access_token":"SHORT","user_id":1791}', '1791'],
+    ['wrapped numeric ID', '{"data":[{"access_token":"SHORT","user_id":1791}]}', '1791'],
+    ['large numeric ID', '{"access_token":"SHORT","user_id":9007199254740993}', '9007199254740993'],
+    ['wrapped large numeric ID', '{"data":[{"access_token":"SHORT","user_id":17912345678901234567}]}', '17912345678901234567'],
+    ['numeric alias', '{"access_token":"SHORT","userId":1791}', '1791'],
+    ['escaped ID key', '{"access_token":"SHORT","user\\u005fid":9007199254740993}', '9007199254740993'],
+  ])('preserves exact identity from %s', async (_name, body, expectedId) => {
+    const fetchImpl = (async () => new Response(body, { status: 200 })) as typeof fetch;
+    const result = await exchangeAuthorizationCode(
+      { appId: '1', appSecret: 's' }, { code: 'c', redirectUri: 'u' }, { fetchImpl },
+    );
+    expect(result.ok).toBe(true);
+    expect(result.tokens?.userId).toBe(expectedId);
+    expect(result.tokens?.accessToken).toBe('SHORT');
+  });
+
+  it.each(['-1791', '1791.5', '1.791e3', '0'])('rejects invalid numeric identity %s', async (id) => {
+    const fetchImpl = (async () => new Response(`{"access_token":"SHORT","user_id":${id}}`, { status: 200 })) as typeof fetch;
+    const result = await exchangeAuthorizationCode(
+      { appId: '1', appSecret: 's' }, { code: 'c', redirectUri: 'u' }, { fetchImpl },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.tokens).toBeNull();
+  });
+
+  it('does not interpret ID-shaped text inside a token as identity', async () => {
+    const token = 'token contains "user_id":9007199254740993';
+    const fetchImpl = jsonFetch(() => ({ status: 200, body: { access_token: token, user_id: '1791' } }));
+    const result = await exchangeAuthorizationCode(
+      { appId: '1', appSecret: 's' }, { code: 'c', redirectUri: 'u' }, { fetchImpl },
+    );
+    expect(result.tokens?.userId).toBe('1791');
+    expect(result.tokens?.accessToken).toBe(token);
+  });
+
   it('parses documented {data:[...]} shape and sets 1h expiry', async () => {
     const fetchImpl = jsonFetch((url) => {
       expect(url).toContain('api.instagram.com/oauth/access_token');

@@ -15,6 +15,10 @@ as closely as makes sense for Meta/Instagram. Tracking issue:
 
 ## Location and stack
 
+- Runtime: Node 22.14.0 or newer. OAuth token responses can contain numeric IDs
+  beyond JavaScript's safe integer range; the parser uses the JSON reviver's
+  original source digits to preserve those IDs exactly as strings.
+
 - Path: `experiments/instagram-sandbox-lab` (this directory; standalone).
 - TypeScript throughout; Vite + React UI; single Node (Express) server hosts both API
   and (in dev) Vite middleware, bound to loopback only.
